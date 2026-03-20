@@ -1,0 +1,183 @@
+USE hospital_db;
+
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'Arpita1205@';
+
+--- CREATING A SCOPE
+CREATE DATABASE SCOPED CREDENTIAL storage_credential
+WITH IDENTITY = 'Managed Identity';
+
+--- DEFINING DATA SOURCE
+CREATE EXTERNAL DATA SOURCE gold_data_source
+WITH (
+    TYPE = HADOOP,
+    LOCATION = 'abfss://gold@hospitalstorageacct.dfs.core.windows.net/'
+    CREDENTIAL = storage_credential
+);
+
+--- DEFINE FORMAT
+CREATE EXTERNAL FILE FORMAT ParquetFileFormat
+WITH (
+    FORMAT_TYPE = PARQUET
+);
+
+
+--- CREATE TABLES
+
+--- PATIENT DIMENSION
+CREATE EXTERNAL TABLE dbo.dim_tbl_patient (
+    patient_id VARCHAR(50),
+    gender VARCHAR(10),
+    age INT,
+    effective_from DATETIME2,
+    surrogate_key BIGINT,
+    effective_to DATETIME2,
+    is_current BIT
+)
+WITH (
+    LOCATION = 'dim_tbl_patient/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+);
+
+----Remove duplicates from Patient dimension table
+
+CREATE EXTERNAL TABLE dbo.dim_tbl_fil_patient
+WITH (
+    LOCATION = 'dim_tbl_fil_patient/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+)
+AS
+SELECT 
+    patient_id,
+    gender,
+    age,
+    effective_from,
+    surrogate_key,
+    effective_to,
+    is_current
+FROM (
+    SELECT 
+        patient_id,
+        gender,
+        age,
+        effective_from,
+        surrogate_key,
+        effective_to,
+        is_current,
+        ROW_NUMBER() OVER (
+            PARTITION BY surrogate_key
+            ORDER BY effective_from DESC
+        ) AS rn
+    FROM dbo.dim_tbl_patient
+) t
+WHERE rn = 1;
+
+
+--- DEPARTMENT DIMENSION
+CREATE EXTERNAL TABLE dbo.dim_tbl_department (
+    department NVARCHAR(200),
+    hospital_id INT,
+    surrogate_key BIGINT
+)
+WITH (
+    LOCATION = 'dim_tbl_department/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+);
+
+----Remove duplicates from Department dimension table
+CREATE EXTERNAL TABLE dbo.dim_tbl_fil_department
+WITH (
+    LOCATION = 'dim_tbl_fil_department/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+)
+AS
+SELECT 
+    department,
+    hospital_id,
+    surrogate_key
+FROM (
+    SELECT 
+        department,
+        hospital_id,
+        surrogate_key,
+        ROW_NUMBER() OVER (
+            PARTITION BY surrogate_key
+            ORDER BY hospital_id
+        ) AS rn
+    FROM dbo.dim_tbl_department
+) t
+WHERE rn = 1;
+
+
+--- FACT TABLE
+CREATE EXTERNAL TABLE dbo.fact_tbl_patient_flow (
+    fact_id BIGINT,
+    patient_sk BIGINT,
+    department_sk BIGINT,
+    admission_time DATETIME2,
+    discharge_time DATETIME2,
+    admission_date DATE,
+    length_of_stay_hours FLOAT,
+    is_currently_admitted BIT,
+    bed_id INT,
+    event_ingestion_time DATETIME2
+)
+WITH (
+    LOCATION = 'fact_tbl_patient_flow/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+);
+
+
+----Remove duplicates from Patient Fact table
+
+CREATE EXTERNAL TABLE dbo.fact_tbl_fil_patient_flow
+WITH (
+    LOCATION = 'fact_tbl_fil_patient_flow/',
+    DATA_SOURCE = gold_data_source,
+    FILE_FORMAT = ParquetFileFormat
+)
+AS
+SELECT 
+    fact_id,
+    patient_sk,
+    department_sk,
+    admission_time,
+    discharge_time,
+    admission_date,
+    length_of_stay_hours,
+    is_currently_admitted,
+    bed_id,
+    event_ingestion_time
+FROM (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY fact_id
+               ORDER BY event_ingestion_time DESC
+           ) AS rn
+    FROM dbo.fact_tbl_patient_flow
+) t
+WHERE rn = 1;
+
+
+
+select count(*) from dbo.fact_tbl_patient_flow;
+select count(*) from dbo.fact_tbl_fil_patient_flow;
+
+DROP EXTERNAL TABLE dbo.dim_tbl_fil_patient;
+
+SELECT surrogate_key, COUNT(*)
+FROM dbo.dim_tbl_fil_patient
+GROUP BY surrogate_key
+HAVING COUNT(*) > 1;
+
+SELECT surrogate_key, COUNT(*)
+FROM dbo.dim_tbl_fil_department
+GROUP BY surrogate_key
+HAVING COUNT(*) > 1;
+
+select * from dbo.fact_tbl_patient_flow;
+select * from dbo.dim_tbl_department;
